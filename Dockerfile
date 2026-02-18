@@ -11,5 +11,5 @@ FROM eclipse-temurin:17-jdk-jammy
 WORKDIR /app
 ARG JAR_FILE=target/*.jar
 COPY --from=builder /workspace/target/*.jar /app/app.jar
-EXPOSE 8080
+EXPOSE 8091
 ENTRYPOINT ["java","-jar","/app/app.jar"]
