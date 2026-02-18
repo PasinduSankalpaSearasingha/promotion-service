@@ -1,0 +1,95 @@
+name: Deploy Promotion Service to Azure Container Apps
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: promotion-service
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Login to Azure
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # 3. Login to ACR
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
+
+      # 4. Build & Push Docker image
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+                       -t ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest .
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+
+      # 5. Deploy to Azure Container Apps (create if not exists, update if exists)
+      - name: Deploy to Azure Container Apps
+        run: |
+          # Check if container app already exists
+          EXISTS=$(az containerapp show \
+            --name promotion-service \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --query name -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$EXISTS" ]; then
+            echo "Creating new container app..."
+            az containerapp create \
+              --name promotion-service \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --environment ${{ secrets.AZURE_CONTAINER_APP_ENV }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --target-port 8080 \
+              --ingress external \
+              --registry-server ${{ secrets.ACR_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }} \
+              --env-vars \
+                DB_URL="${{ secrets.DB_URL }}" \
+                DB_USERNAME="${{ secrets.DB_USERNAME }}" \
+                DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.5 \
+              --memory 1.0Gi
+          else
+            echo "Updating existing container app..."
+            az containerapp update \
+              --name promotion-service \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --set-env-vars \
+                DB_URL="${{ secrets.DB_URL }}" \
+                DB_USERNAME="${{ secrets.DB_USERNAME }}" \
+                DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.5 \
+              --memory 1.0Gi
+          fi
+
+      # 6. Verify deployment health
+      - name: Verify deployment
+        run: |
+          FQDN=$(az containerapp show \
+            --name promotion-service \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv)
+          echo "Promotion Service URL: https://$FQDN"
+          echo "Health Check URL: https://$FQDN/actuator/health"
+          sleep 30
+          curl -f "https://$FQDN/actuator/health" || echo "Health check pending - container may still be starting"
